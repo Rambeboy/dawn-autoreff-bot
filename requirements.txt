@@ -1,8 +1,8 @@
 beautifulsoup4
 colorama
-curl_cffi
-fake_useragent
-google-generativeai
+curl-cffi
+fake-useragent
 names
-pillow
 requests
+2captcha-python
+anticaptchaofficial
