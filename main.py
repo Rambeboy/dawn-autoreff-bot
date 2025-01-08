@@ -1,20 +1,17 @@
 import base64
-import google.generativeai as genai
-import io
 import json
 import names
 import os
 import random
 import requests
 import string
-import sys
-import time
 from bs4 import BeautifulSoup
 from colorama import init, Fore, Style
 from curl_cffi import requests as curl_requests
 from datetime import datetime, timezone
 from fake_useragent import UserAgent
-from PIL import Image
+from twocaptcha import TwoCaptcha
+from anticaptchaofficial.imagecaptcha import *
 
 init(autoreset=True)
 ua = UserAgent()
@@ -98,11 +95,16 @@ def log_message(message="", message_type="info"):
     log_color = colors.get(message_type, Fore.LIGHTWHITE_EX)
     print(f"{Fore.WHITE}[{Style.DIM}{timestamp}{Style.RESET_ALL}{Fore.WHITE}] {account_status}{log_color}{message}")
 
-def setup_genai(api_key):
-    global model
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    return model
+def setup_captcha_solver(api_key, solver_type):
+    global solver, model
+    model = solver_type
+    
+    if solver_type == "2captcha":
+        solver = TwoCaptcha(api_key)
+    else:
+        solver = imagecaptcha()
+        solver.set_key(api_key)
+    return solver
 
 def get_random_domain(proxies):
     log_message("Searching for available email domain...", "process")
@@ -117,7 +119,7 @@ def get_random_domain(proxies):
                 f'https://generator.email/search.php?key={keyword}',
                 headers=get_headers(),
                 proxies=proxies,
-                timeout=60
+                timeout=120
             )
             domains = response.json()
             valid_domains = [d for d in domains if all(ord(c) < 128 for c in d)]
@@ -163,7 +165,8 @@ def get_puzzle_id(app_id, proxies):
                 headers=get_headers(),
                 params=params,
                 proxies=proxies,
-                impersonate="chrome110"
+                impersonate="chrome110",
+                timeout=120
             )
             response.raise_for_status()
             return response.json()['puzzle_id']
@@ -190,7 +193,8 @@ def get_puzzle_image(puzzle_id, app_id, proxies):
                 headers=get_headers(),
                 params=params,
                 proxies=proxies,
-                impersonate="chrome110"
+                impersonate="chrome110",
+                timeout=120
             )
             response.raise_for_status()
             return response.json()['imgBase64']
@@ -202,14 +206,33 @@ def get_puzzle_image(puzzle_id, app_id, proxies):
                 log_message(f"Error getting puzzle image after {MAX_RETRIES} attempts: {str(e)}", "error")
                 raise
 
-def process_image(base64_image, model):
-    image_data = base64.b64decode(base64_image)
-    image = Image.open(io.BytesIO(image_data))
-    
-    prompt = "This is a CAPTCHA image. Please read and provide only the text/characters shown in the image. Return only the characters, no additional text or explanation."
-    response = model.generate_content([prompt, image])
-    cleaned_text = response.text.strip().replace(" ", "")
-    return cleaned_text
+def process_image(base64_image, solver_type):
+    try:
+        image_data = base64.b64decode(base64_image)
+        temp_image = "temp_captcha.png"
+        
+        with open(temp_image, "wb") as f:
+            f.write(image_data)
+
+        try:
+            if solver_type == "2captcha":
+                result = solver.normal(temp_image)
+                captcha_text = result['code']
+            else:
+                solver.set_verbose(0)
+                captcha_text = solver.solve_and_return_solution(file_path=temp_image)
+                if captcha_text == 0:
+                    raise Exception("Failed to solve captcha")
+            
+            return captcha_text
+            
+        finally:
+            if os.path.exists(temp_image):
+                os.remove(temp_image)
+                
+    except Exception as e:
+        log_message(f"Error solving captcha: {str(e)}", "error")
+        raise
 
 def get_verification_link(email, domain, proxies):
     log_message("Waiting for verification email...", "process")
@@ -228,7 +251,7 @@ def get_verification_link(email, domain, proxies):
                 headers=get_headers(),
                 cookies=cookies,
                 proxies=proxies,
-                timeout=60
+                timeout=120
             )
             
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -289,7 +312,8 @@ def register_user(puzzle_id, captcha_text, email, password, referral_code, app_i
                 params=params, 
                 json=data,
                 proxies=proxies,
-                impersonate="chrome110"
+                impersonate="chrome110",
+                timeout=120
             )
             return response.status_code
         except Exception as e:
@@ -310,7 +334,7 @@ def verify_email(verification_url, proxies):
                 headers=get_headers(),
                 proxies=proxies,
                 impersonate="chrome110",
-                timeout=60
+                timeout=120
             )
             success = response.status_code == 200
             
@@ -365,7 +389,8 @@ def login_user(email, password, app_id, proxies):
                     headers=headers,
                     json=login_data,
                     proxies=proxies,
-                    impersonate="chrome110"
+                    impersonate="chrome110",
+                    timeout=120
                 )
                 
                 if response.status_code == 200:
@@ -411,7 +436,8 @@ def verify_social_media(token, app_id, proxies):
                     headers=headers,
                     json=data,
                     proxies=proxies,
-                    impersonate="chrome110"
+                    impersonate="chrome110",
+                    timeout=120
                 )
                 
                 if response.status_code == 200:
@@ -442,7 +468,8 @@ def get_user_points(token, app_id, proxies):
                 params={'appid': app_id},
                 headers=headers,
                 proxies=proxies,
-                impersonate="chrome110"
+                impersonate="chrome110",
+                timeout=120
             )
             
             if response.status_code == 200:
@@ -547,7 +574,7 @@ def process_single_account(current_account, proxy_manager, email_domain, referra
                             f.write("-" * 50 + "\n")
                         with open("accounts-for-dawn-validator-bot.txt", "a") as f:
                             f.write(f"{email}:{token}\n")
-                        print(f"Account {current_account} success referred to {Fore.LIGHTMAGENTA_EX}{referral_code}{Fore.RESET}{Fore.LIGHTCYAN_EX}, Processing next account...{Fore.RESET}\n")
+                        print(f"\nAccount {current_account} success referred to {Fore.LIGHTMAGENTA_EX}{referral_code}{Fore.RESET}{Fore.LIGHTCYAN_EX}, Processing next account...{Fore.RESET}\n")
                         return True
                     else:
                         log_message("Login failed", "error")
@@ -569,9 +596,8 @@ def process_single_account(current_account, proxy_manager, email_domain, referra
     
     return False
 
-def main(email_domain=None, referral_code=None, api_key=None, num_accounts=1):
+def main():
     global current_account, total_accounts, successful_accounts, failed_accounts
-    total_accounts = num_accounts
     
     banner = f"""
 {Fore.LIGHTCYAN_EX}╔═══════════════════════════════════════════╗
@@ -581,21 +607,36 @@ def main(email_domain=None, referral_code=None, api_key=None, num_accounts=1):
 """
     print(banner)
     print(f"{Fore.LIGHTRED_EX}Once All Process Completed, run this bot: {Fore.LIGHTMAGENTA_EX}https://github.com/im-hanzou/dawn-validator-bot{Fore.RESET}\n{Fore.LIGHTRED_EX}Copy and Paste content of {Fore.LIGHTMAGENTA_EX}accounts-for-dawn-validator-bot.txt{Fore.RESET} {Fore.LIGHTRED_EX}to{Fore.RESET} {Fore.LIGHTMAGENTA_EX}accounts.txt{Fore.RESET} {Fore.LIGHTRED_EX}in{Fore.RESET} {Fore.LIGHTMAGENTA_EX}dawn-validator-bot{Style.RESET_ALL}\n")
-    if not all([referral_code, api_key]):
-        print(f"{Fore.CYAN}Enter referral code: {Style.RESET_ALL}", end="")
-        referral_code = input()
-        print(f"{Fore.CYAN}Enter your GEN-AI Apikey: {Style.RESET_ALL}", end="")
-        api_key = input()
-        print(f"{Fore.CYAN}Enter how many accounts: {Style.RESET_ALL}", end="")
-        num_accounts = int(input())
-        total_accounts = num_accounts
+
+    while True:
+        print(f"{Fore.CYAN}Choose your captcha solver:")
+        print(f"1. 2captcha")
+        print(f"2. Anti-Captcha")
+        print(f"Enter your choice (1 or 2): {Style.RESET_ALL}", end="")
+        solver_choice = input().strip()
+        
+        if solver_choice in ['1', '2']:
+            solver_type = "2captcha" if solver_choice == '1' else "anticaptcha"
+            break
+        else:
+            print(f"{Fore.LIGHTRED_EX}Invalid choice. Please enter 1 or 2.{Style.RESET_ALL}")
+
+    print(f"{Fore.CYAN}\nEnter referral code: {Style.RESET_ALL}", end="")
+    referral_code = input()
+    
+    print(f"{Fore.CYAN}Enter your {solver_type} API key: {Style.RESET_ALL}", end="")
+    captcha_api_key = input()
+    
+    print(f"{Fore.CYAN}Enter how many accounts: {Style.RESET_ALL}", end="")
+    num_accounts = int(input())
+    total_accounts = num_accounts
     
     try:
-        model = setup_genai(api_key)
+        setup_captcha_solver(captcha_api_key, solver_type)
         proxy_manager = ProxyManager()
         
         for current_account in range(1, num_accounts + 1):
-            if process_single_account(current_account, proxy_manager, email_domain, referral_code, api_key):
+            if process_single_account(current_account, proxy_manager, None, referral_code, solver_type):
                 successful_accounts += 1
             else:
                 failed_accounts += 1
